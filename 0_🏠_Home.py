@@ -1,9 +1,11 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import google.generativeai as genai
 from PIL import Image
 import io
 import os
 import pdfplumber
+import json
 
 st.set_page_config(page_title="Data‑Vista", layout="wide")
 st.title("Data‑Vista: Smart Notes Visualizer 🚀")
@@ -34,6 +36,24 @@ st.markdown("""
 Upload your study notes in any format - typed documents, PDFs, or even handwritten notes!
 Gemini's multimodal AI will intelligently extract and understand your content.
 """)
+
+def log_to_console(message: str, data: str = ""):
+    """Log messages to browser console for debugging"""
+    try:
+        # Escape and truncate data for safe JSON embedding
+        safe_data = data.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")[:500]
+        
+        js_code = f"""
+        <script>
+        console.log("[Data-Vista] {message}");
+        console.log("[Data-Vista] Response preview:", "{safe_data}...");
+        console.log("[Data-Vista] Full length:", {len(data)} + " characters");
+        </script>
+        """
+        components.html(js_code, height=0)
+    except Exception as e:
+        # Silent fail - don't break app if logging fails
+        pass
 
 def get_pdf_page_count(pdf_file) -> int:
     """Get total page count of PDF"""
@@ -83,6 +103,7 @@ def extract_with_gemini(uploaded_file, start_page=None, end_page=None) -> str:
                     "Preserve the structure and formatting. Return only the extracted text without any additional commentary.",
                     img
                 ])
+                log_to_console("Image processed", response.text)
                 return response.text
         
         # For PDFs with page selection
@@ -290,4 +311,4 @@ else:
 
 # Footer
 st.divider()
-st.caption("Powered by Google Gemini 1.5 Flash • Built with Streamlit")
+st.caption("Powered by Google Gemini 1.5 Flash • Built with Streamlit • Check browser console (F12) for AI response logs")
