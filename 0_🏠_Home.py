@@ -3,6 +3,7 @@ import google.generativeai as genai
 from PIL import Image
 import io
 import os
+import pdfplumber
 
 st.set_page_config(page_title="Data‑Vista", layout="wide")
 st.title("Data‑Vista: Smart Notes Visualizer 🚀")
@@ -16,8 +17,8 @@ def init_gemini():
         st.error("⚠️ GEMINI_API_KEY not found! Please set it in environment variables or .streamlit/secrets.toml")
         st.stop()
     genai.configure(api_key=api_key)
+    # Use gemini-1.5-flash for better free tier support
     return genai.GenerativeModel('gemini-2.0-flash')
-    # return genai.GenerativeModel('gemini-2.5-flash-latest')
 
 model = init_gemini()
 
@@ -34,7 +35,39 @@ Upload your study notes in any format - typed documents, PDFs, or even handwritt
 Gemini's multimodal AI will intelligently extract and understand your content.
 """)
 
-def extract_with_gemini(uploaded_file) -> str:
+def get_pdf_page_count(pdf_file) -> int:
+    """Get total page count of PDF"""
+    try:
+        pdf_file.seek(0)
+        with pdfplumber.open(pdf_file) as pdf:
+            return len(pdf.pages)
+    except Exception:
+        return 0
+
+def extract_pdf_pages_as_images(pdf_file, start_page: int, end_page: int):
+    """Extract specific pages from PDF as images for Gemini"""
+    try:
+        pdf_file.seek(0)
+        images = []
+        
+        with pdfplumber.open(pdf_file) as pdf:
+            total_pages = len(pdf.pages)
+            start = max(0, start_page - 1)  # Convert to 0-indexed
+            end = min(total_pages, end_page)
+            
+            for page_num in range(start, end):
+                page = pdf.pages[page_num]
+                # Convert page to image
+                img = page.to_image(resolution=150)
+                pil_img = img.original
+                images.append(pil_img)
+        
+        return images
+    except Exception as e:
+        st.error(f"Error extracting PDF pages: {str(e)}")
+        return []
+
+def extract_with_gemini(uploaded_file, start_page=None, end_page=None) -> str:
     """Extract text from any document using Gemini's multimodal capabilities"""
     try:
         name = uploaded_file.name.lower()
@@ -52,28 +85,52 @@ def extract_with_gemini(uploaded_file) -> str:
                 ])
                 return response.text
         
-        # For PDFs
+        # For PDFs with page selection
         elif name.endswith('.pdf'):
-            with st.spinner("🤖 Gemini is processing your PDF..."):
-                # Upload file to Gemini File API
-                uploaded_pdf = genai.upload_file(uploaded_file, mime_type="application/pdf")
+            pdf_file = io.BytesIO(uploaded_file.read())
+            total_pages = get_pdf_page_count(pdf_file)
+            
+            if total_pages == 0:
+                st.error("Could not read PDF file")
+                return ""
+            
+            # Use provided page range or default to all pages
+            start = start_page if start_page else 1
+            end = end_page if end_page else total_pages
+            
+            with st.spinner(f"🤖 Gemini is processing pages {start}-{end} of your PDF..."):
+                # Extract pages as images
+                page_images = extract_pdf_pages_as_images(pdf_file, start, end)
                 
-                response = model.generate_content([
-                    "Extract ALL text content from this PDF document. "
-                    "Preserve the structure, headings, and important formatting. "
-                    "If any pages have images with text, extract that too. "
-                    "Return only the extracted text without commentary.",
-                    uploaded_pdf
-                ])
+                if not page_images:
+                    return ""
                 
-                # Clean up uploaded file
-                genai.delete_file(uploaded_pdf.name)
-                return response.text
+                # Process each page with Gemini
+                all_text = []
+                progress_bar = st.progress(0)
+                
+                for idx, img in enumerate(page_images):
+                    page_num = start + idx
+                    st.write(f"📄 Processing page {page_num}...")
+                    
+                    response = model.generate_content([
+                        f"Extract ALL text from this PDF page (page {page_num}). "
+                        "Preserve structure, headings, and formatting. "
+                        "If there are tables, preserve their structure. "
+                        "Return only the extracted text.",
+                        img
+                    ])
+                    
+                    log_to_console(f"PDF page {page_num} processed", response.text)
+                    all_text.append(f"\n--- Page {page_num} ---\n{response.text}")
+                    progress_bar.progress((idx + 1) / len(page_images))
+                
+                progress_bar.empty()
+                return "\n".join(all_text)
         
         # For DOCX
         elif name.endswith('.docx'):
             with st.spinner("🤖 Gemini is processing your document..."):
-                # Read DOCX as bytes and let Gemini handle it
                 uploaded_file.seek(0)
                 uploaded_doc = genai.upload_file(uploaded_file, mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
                 
@@ -84,11 +141,13 @@ def extract_with_gemini(uploaded_file) -> str:
                     uploaded_doc
                 ])
                 
+                log_to_console("DOCX processed", response.text)
                 genai.delete_file(uploaded_doc.name)
                 return response.text
         
         # For TXT files
         elif name.endswith('.txt'):
+            uploaded_file.seek(0)
             raw = uploaded_file.read()
             for enc in ("utf-8", "utf-16", "latin-1"):
                 try:
@@ -113,25 +172,68 @@ uploaded = st.file_uploader(
     help="Supports typed documents, scanned pages, and handwritten notes"
 )
 
-if uploaded:
-    with st.status("Processing document...", expanded=True) as status:
-        st.write("📄 Reading file...")
-        text = extract_with_gemini(uploaded)
+# Page selection for PDFs
+start_page = None
+end_page = None
+
+if uploaded and uploaded.name.lower().endswith('.pdf'):
+    # Get page count
+    pdf_bytes = io.BytesIO(uploaded.read())
+    total_pages = get_pdf_page_count(pdf_bytes)
+    uploaded.seek(0)  # Reset for later processing
+    
+    if total_pages > 0:
+        st.info(f"📄 PDF has {total_pages} pages")
         
-        if text:
-            st.session_state.text = text
-            status.update(label="✅ Document processed successfully!", state="complete", expanded=False)
+        col1, col2, col3 = st.columns([2, 2, 1])
+        
+        with col1:
+            start_page = st.number_input(
+                "Start page",
+                min_value=1,
+                max_value=total_pages,
+                value=1,
+                help="First page to process"
+            )
+        
+        with col2:
+            end_page = st.number_input(
+                "End page",
+                min_value=1,
+                max_value=total_pages,
+                value=min(10, total_pages),  # Default to first 10 pages
+                help="Last page to process (max recommended: 20 pages)"
+            )
+        
+        with col3:
+            st.metric("Pages", f"{end_page - start_page + 1}")
+        
+        if end_page < start_page:
+            st.warning("⚠️ End page must be >= start page")
+        elif (end_page - start_page + 1) > 20:
+            st.warning("⚠️ Processing more than 20 pages may hit rate limits. Consider splitting into smaller batches.")
+
+# Process button
+if uploaded:
+    if st.button("🚀 Process Document", type="primary", use_container_width=True):
+        with st.status("Processing document...", expanded=True) as status:
+            st.write("📄 Reading file...")
+            text = extract_with_gemini(uploaded, start_page, end_page)
             
-            # Show extraction stats
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Characters", f"{len(text):,}")
-            with col2:
-                st.metric("Words", f"{len(text.split()):,}")
-            with col3:
-                st.metric("Lines", f"{text.count(chr(10)) + 1:,}")
-        else:
-            status.update(label="❌ Failed to process document", state="error")
+            if text:
+                st.session_state.text = text
+                status.update(label="✅ Document processed successfully!", state="complete", expanded=False)
+                
+                # Show extraction stats
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Characters", f"{len(text):,}")
+                with col2:
+                    st.metric("Words", f"{len(text.split()):,}")
+                with col3:
+                    st.metric("Lines", f"{text.count(chr(10)) + 1:,}")
+            else:
+                status.update(label="❌ Failed to process document", state="error")
 
 # Text preview
 if st.session_state.text:
@@ -173,6 +275,7 @@ else:
         ✅ **Accepts Multiple Formats**: PDF, Word docs, text files, images  
         ✅ **Reads Handwriting**: Gemini can transcribe handwritten notes  
         ✅ **Smart Extraction**: Understands document structure and context  
+        ✅ **Page Selection**: Choose specific pages to process (saves API quota!)  
         ✅ **Visual Analysis**: Generates charts, word clouds, and concept maps  
         ✅ **Topic Discovery**: Automatically identifies main themes  
         ✅ **Export Reports**: Create professional PDFs with all visualizations  
@@ -181,8 +284,10 @@ else:
         - Students reviewing lecture notes
         - Researchers analyzing papers
         - Anyone organizing knowledge from documents
+        
+        **💡 Pro Tip**: For large PDFs, process 10-20 pages at a time to avoid rate limits!
         """)
 
 # Footer
 st.divider()
-st.caption("Powered by Google Gemini 2.5 Flash • Built with Streamlit")
+st.caption("Powered by Google Gemini 1.5 Flash • Built with Streamlit")
