@@ -6,9 +6,12 @@ from sklearn.preprocessing import normalize
 from scipy import sparse
 import re
 import plotly.express as px
+import matplotlib.pyplot as plt
+
 
 st.set_page_config(layout="wide")
 st.title("🧩 Topic Modeling")
+
 
 def topic_model(text, n_topics=5, max_features=5000):
     def basic_clean(s):
@@ -30,8 +33,10 @@ def topic_model(text, n_topics=5, max_features=5000):
     weights = weights/(weights.sum()+1e-12)
     return {"topic_terms":topic_terms, "topic_weights":weights}
 
+
 if not st.session_state.text:
     st.warning("Please upload text on Home."); st.stop()
+
 
 k = st.slider("Number of topics", 2, 8, 5)
 if st.button("Detect Topics"):
@@ -42,11 +47,28 @@ if st.button("Detect Topics"):
         st.session_state.topics = topics
         labels = [f"Topic {i+1}: " + ", ".join(t[:4]) for i,t in enumerate(topics["topic_terms"])]
         df = pd.DataFrame({"Topic": labels, "Weight": topics["topic_weights"]})
+        
+        # Display interactive Plotly chart
         fig = px.pie(df, values="Weight", names="Topic", title="Topic Distribution")
         st.plotly_chart(fig, use_container_width=True)
+        
+        # Save using matplotlib (no Chrome needed!)
         try:
-            path = "topic_pie.png"; fig.write_image(path, scale=2); st.session_state.plots["topic_pie"]=path
+            plt.figure(figsize=(10, 6))
+            colors = px.colors.qualitative.Plotly[:len(df)]
+            plt.pie(df["Weight"], labels=df["Topic"], autopct='%1.1f%%', colors=colors)
+            plt.title("Topic Distribution", fontsize=16, fontweight='bold')
+            
+            path = "topic_pie.png"
+            plt.savefig(path, dpi=300, bbox_inches='tight', facecolor='white')
+            plt.close()
+            
+            st.session_state.plots["topic_pie"] = path
+            st.success("✅ Chart saved successfully!")
         except Exception as e:
-            st.caption(f"(Could not save topic image: {e})")
+            st.session_state.plots["topic_pie"] = None
+        
+        # Display topics
+        st.subheader("📋 Detected Topics")
         for i, terms in enumerate(topics["topic_terms"]):
-            st.write(f"• Topic {i+1} → {', '.join(terms[:8])}")
+            st.write(f"• **Topic {i+1}** → {', '.join(terms[:8])}")
