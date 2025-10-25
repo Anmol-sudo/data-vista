@@ -16,7 +16,8 @@ def init_gemini():
         st.error("⚠️ GEMINI_API_KEY not found! Please set it in environment variables or .streamlit/secrets.toml")
         st.stop()
     genai.configure(api_key=api_key)
-    return genai.GenerativeModel('gemini-2.5-flash-latest')
+    return genai.GenerativeModel('gemini-2.0-flash')
+    # return genai.GenerativeModel('gemini-2.5-flash-latest')
 
 model = init_gemini()
 
